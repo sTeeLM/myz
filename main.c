@@ -23,12 +23,26 @@ const char * MY_ZIP_MODE = "MY_ZIP_MODE:0";
 #define MY_ZIP_MODE_HEADER_LEN 12
 
 int32_t operation_mode = 0; // 0: encode, 1: decode
-uint64_t data_offset = 0;
+uint32_t data_offset = 0;
 int32_t verbose = 0;
 int32_t thread_cnt = -1;
 uint32_t compress_level = LZMA_PRESET_DEFAULT;
-
+// global vars
 ///////////////////////////////////////////////////
+uint64_t total_size = 0;
+uint64_t current_size = 0;
+//////////////////////////////////////////////////
+
+
+static void
+print_progress(uint32_t current_size, uint32_t total_size)
+{
+	double progress = 0.0;
+	if(!verbose)
+		return;
+	progress = (100.0 * current_size) / total_size;
+	fprintf(stderr, "\rIn progress %.2f%%", progress);
+}
 
 static int32_t
 init_decoder(lzma_stream *strm, lzma_ret * lzma_err)
@@ -119,6 +133,9 @@ decompress(lzma_stream *strm, FILE *infile, FILE *outfile,
 			strm->next_in = inbuf;
 			strm->avail_in = fread(inbuf, 1, sizeof(inbuf),
 					infile);
+
+			current_size += strm->avail_in;
+			print_progress(current_size, total_size);
 
 			if (ferror(infile)) {
 				*filein_err = errno;
@@ -270,6 +287,9 @@ compress(lzma_stream *strm, FILE *infile, FILE *outfile,
 			strm->avail_in = fread(inbuf, 1, sizeof(inbuf),
 					infile);
 
+			current_size += strm->avail_in;
+			print_progress(current_size, total_size);
+
 			if (ferror(infile)) {
 				*filein_err = errno;
 				return 2;
@@ -337,10 +357,13 @@ load_mode()
 
 
 static int32_t
-get_file_size(FILE * file, uint32_t * size)
+get_file_size(FILE * file, uint64_t * size)
 {
 	struct stat st;
-	if(fstat(fileno(file), &st) < 0) return 1;
+	if(fstat(fileno(file), &st) < 0) {
+		fprintf(stderr, "get file size error: %s\n", strerror(errno));
+		return 1;
+	}
 	*size = st.st_size;
 	return 0;
 }
@@ -372,7 +395,7 @@ init_decompress_header(const char * file, uint32_t * len)
 {
 	FILE *infile = NULL;
 	uint8_t * header = NULL;
-	uint32_t file_size;
+	uint64_t file_size;
 	char * p = NULL;
 
 	infile = fopen(file, "rb");
@@ -385,17 +408,23 @@ init_decompress_header(const char * file, uint32_t * len)
 	}
 
 	if((header = malloc(file_size)) == NULL) {
+		fprintf(stderr, "malloc error\n");
 		goto err;
 	}
 
 	fread(header, 1, file_size, infile);
 	if (ferror(infile)) {
+		fprintf(stderr, "read file error: %s\n", strerror(errno));
 		goto err;
 	}
+
 	p = my_memmem(header, file_size,
                     MY_ZIP_DATA_OFFSET,MY_ZIP_DATA_OFFSET_LEN);
 
-	if(NULL == p) goto err;
+	if(NULL == p) {
+		fprintf(stderr, "corrupt file header\n");
+		goto err;
+	}
 
 	p += MY_ZIP_DATA_OFFSET_HEADER_LEN;
 
@@ -404,7 +433,10 @@ init_decompress_header(const char * file, uint32_t * len)
 	p = my_memmem(header, file_size,
                     MY_ZIP_MODE,MY_ZIP_MODE_LEN);
 
-	if(NULL == p) goto err;
+	if(NULL == p) {
+		fprintf(stderr, "corrupt file header\n");
+		goto err;
+	}
 
 	p += MY_ZIP_MODE_HEADER_LEN;
 
@@ -430,11 +462,24 @@ static struct option compress_options[] = {
 	{"help",    no_argument,       0,  'h' },
 	{0,         0,                 0,  0   }
 };
+static const char * compress_option_desc[] = {
+"compress level 0-9, default 6",
+"exterme compression, default off",
+"verbose mode, default off",
+"max thread count, default 8",
+"show help",
+NULL
+};
 
 static void
 compress_usage(const char *prog)
 {
-	fprintf(stderr, "compress_usage\n");
+	int32_t i;
+	fprintf(stderr, "%s: <OPTIONS> [input file] [output file]\n",prog);
+	for(i = 0; i < sizeof(compress_options)/sizeof(struct option) - 1; i++) {
+		fprintf(stderr, "    --%s|-%c: %s\n", compress_options[i].name, 
+			compress_options[i].val, compress_option_desc[i]);
+	}
 }
 
 static int32_t
@@ -490,39 +535,36 @@ compress_main(int32_t argc, char **argv)
 	}
 
 	if((header = init_decompress_header(argv[0], &header_len)) == NULL) {
-		fprintf(stderr, "%s: Error init the "
-					"header\n");
+		fprintf(stderr, "%s: Error init the header\n");
 		goto err;
 	}
 
 	if(init_encoder(&strm, &lzma_err)!=0) {
-		fprintf(stderr, "%s: Error init the "
-					"encoder: %s\n",
+		fprintf(stderr, "%s: Error init the encoder: %s\n",
 					argv[0], lzma_strerror(lzma_err));
 		goto err;
 	}
 
 	infile = fopen(argv[optind], "rb");
 	if (infile == NULL) {
-		fprintf(stderr, "%s: Error opening the "
-					"input file: %s\n",
+		fprintf(stderr, "%s: Error opening the input file: %s\n",
 					argv[optind], strerror(errno));
+		goto err;
+	}
+
+	if(get_file_size(infile, &total_size) < 0) {
 		goto err;
 	}
 
 	outfile = fopen(argv[optind + 1], "wb");
 	if (outfile == NULL) {
-		fprintf(stderr, "%s: Error opening the "
-					"output file: %s\n",
+		fprintf(stderr, "%s: Error opening the output file: %s\n",
 					argv[1], strerror(errno));
 		goto err;
 	}
 
-	printf("%d\n", header_len);
-
 	if (fwrite(header, 1, header_len, outfile) != header_len) {
-		fprintf(stderr, "%s: Error write the "
-					"output file: %s\n",
+		fprintf(stderr, "%s: Error write the output file: %s\n",
 					argv[1], strerror(errno));
 		goto err;
 	}
@@ -531,18 +573,17 @@ compress_main(int32_t argc, char **argv)
 	header = NULL;
 
 	ret = compress(&strm, infile, outfile, &lzma_err, &filein_err, &fileout_err);
+
+	fprintf(stderr, "\n");
 	if(ret != 0) {
 		if(ret == 1) {
-			fprintf(stderr, "%s: Error decompress the "
-						"file: %s\n",
+			fprintf(stderr, "%s: Error compress the file: %s\n",
 						argv[0], lzma_strerror(lzma_err));
 		} else if(ret == 2) {
-			fprintf(stderr, "%s: Error read the "
-						"input file: %s\n",
+			fprintf(stderr, "%s: Error read the input file: %s\n",
 						argv[0], strerror(filein_err));			
 		} else {
-			fprintf(stderr, "%s: Error write the "
-						"output file: %s\n",
+			fprintf(stderr, "%s: Error write the output file: %s\n",
 						argv[0], strerror(fileout_err));	
 		}
 		goto err;
@@ -582,8 +623,11 @@ load_offset()
 {
 	uint64_t val;
 	char * endptr = NULL;
-	val = strtoull(MY_ZIP_DATA_OFFSET + MY_ZIP_DATA_OFFSET_HEADER_LEN, &endptr, 10);
-	if(val == ULLONG_MAX && errno == ERANGE) return 1;
+	val = strtoul(MY_ZIP_DATA_OFFSET + MY_ZIP_DATA_OFFSET_HEADER_LEN, &endptr, 10);
+	if(val == ULONG_MAX && errno == ERANGE) {
+		fprintf(stderr, "corrupt file header\n");
+		return 1;
+	}
 	data_offset = val;
 	return 0;
 }
@@ -593,11 +637,21 @@ static struct option decompress_options[] = {
 	{"help", no_argument,  0, 'h' },
 	{0, 0, 0,  0}
 };
+static const char * decompress_option_desc[] = {
+"verbose mode, default off",
+"show help",
+NULL
+};
 
 static void
 decompress_usage(const char *prog)
 {
-	fprintf(stderr, "decompress_usage\n");
+	int32_t i;
+	fprintf(stderr, "%s: <OPTIONS> [output file]\n",prog);
+	for(i = 0; i < sizeof(decompress_options)/sizeof(struct option) - 1; i++) {
+		fprintf(stderr, "    --%s|-%c: %s\n", decompress_options[i].name, 
+			decompress_options[i].val, decompress_option_desc[i]);
+	}
 }
 
 static int32_t
@@ -609,62 +663,84 @@ decompress_main(int32_t argc, char **argv)
 	int32_t ret;
 	FILE *outfile = NULL;
 	FILE *infile = NULL;
+	int32_t option_index = 0;
+	int32_t opt;
+	int32_t val;
+    extern char *optarg;
+    extern int optind, opterr, optopt;
 
-	if (argc <= 1) {
-		fprintf(stderr, "Usage: %s OUTPUT\n", argv[0]);
-		return EXIT_FAILURE;
+	while((opt = getopt_long(argc, argv, "vh",
+		compress_options, &option_index)) != -1) {
+		switch (opt) {
+		case 'v':
+			verbose = 1;
+			break;
+		case 'h':
+			decompress_usage(argv[0]);
+			exit(EXIT_SUCCESS);
+			break;
+		default: 
+			decompress_usage(argv[0]);
+			exit(EXIT_FAILURE);
+		}	
+	}
+
+	if (argc - optind != 1) {
+		decompress_usage(argv[0]);
+		exit(EXIT_FAILURE);
 	}
 
 	if (init_decoder(&strm, &lzma_err) != 0) {
-		fprintf(stderr, "%s: Error init the "
-					"decoder: %s\n",
+		fprintf(stderr, "%s: Error init the decoder: %s\n",
 					argv[0], lzma_strerror(lzma_err));
 		goto err;
 	}
 
 	infile = fopen(argv[0], "rb");
 	if (infile == NULL) {
-		fprintf(stderr, "%s: Error opening the "
-					"input file: %s\n",
+		fprintf(stderr, "%s: Error opening the input file: %s\n",
 					argv[0], strerror(errno));
 		goto err;
 	}
 
 	if(load_offset() != 0) {
-		fprintf(stderr, "%s: Error read the offset from "
-					"input file\n",
+		fprintf(stderr, "%s: Error read the offset from input file\n",
 					argv[0]);
 		goto err;		
 	}
 
+	if(get_file_size(infile, &total_size) < 0) {
+		goto err;
+	}
+
+	total_size -= data_offset;
+
 	if(fseek(infile,data_offset,SEEK_SET) < 0) {
-		fprintf(stderr, "%s: Error seeking the "
-					"input file: %s\n",
+		fprintf(stderr, "%s: Error seeking the input file: %s\n",
 					argv[0], strerror(errno));
 	}
 
-	outfile = fopen(argv[1], "wb");
+	outfile = fopen(argv[optind], "wb");
 	if (outfile == NULL) {
-		fprintf(stderr, "%s: Error opening the "
-					"output file: %s\n",
-					argv[1], strerror(errno));
+		fprintf(stderr, "%s: Error opening the output file: %s\n",
+					argv[optind], strerror(errno));
 		goto err;
 	}
 
 	// Try to decompress all files.
 	ret = decompress(&strm, infile, outfile, &lzma_err, &filein_err, &fileout_err);
+
+	fprintf(stderr, "\n");
+
 	if(ret != 0) {
 		if(ret == 1) {
-			fprintf(stderr, "%s: Error decompress the "
-						"file: %s\n",
+			fprintf(stderr, "%s: Error decompress the file: %s\n",
 						argv[0], lzma_strerror(lzma_err));
 		} else if(ret == 2) {
-			fprintf(stderr, "%s: Error read the "
-						"input file: %s\n",
+			fprintf(stderr, "%s: Error read the input file: %s\n",
 						argv[0], strerror(filein_err));			
 		} else {
-			fprintf(stderr, "%s: Error write the "
-						"output file: %s\n",
+			fprintf(stderr, "%s: Error write the output file: %s\n",
 						argv[0], strerror(fileout_err));	
 		}
 		goto err;
@@ -681,7 +757,7 @@ decompress_main(int32_t argc, char **argv)
 	infile = NULL;
 
 	if (fclose(outfile)) {
-		fprintf(stderr, "%s: Write error: %s\n", argv[1], strerror(errno));
+		fprintf(stderr, "%s: Write error: %s\n", argv[optind], strerror(errno));
 		goto err;
 	}
 	outfile = NULL;
