@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <getopt.h>
 
-#define MAX_COMPRESS_THREAD 8
+#define MAX_COMPRESS_THREAD 512
 
 // global config
 ///////////////////////////////////////////////////
@@ -228,7 +228,9 @@ init_encoder(lzma_stream *strm, lzma_ret * lzma_err)
 	};
 
 	// Detect how many threads the CPU supports.
-	mt.threads = lzma_cputhreads();
+	if(thread_cnt < 0) {
+		thread_cnt = lzma_cputhreads();
+	}
 
 	// If the number of CPU cores/threads cannot be detected,
 	// use one thread. Note that this isn't the same as the normal
@@ -237,8 +239,8 @@ init_encoder(lzma_stream *strm, lzma_ret * lzma_err)
 	// You may want to consider using lzma_easy_encoder() or
 	// lzma_stream_encoder() instead of lzma_stream_encoder_mt() if
 	// lzma_cputhreads() returns 0 or 1.
-	if (mt.threads == 0)
-		mt.threads = 1;
+	if (thread_cnt == 0)
+		thread_cnt = 1;
 
 	// If the number of CPU cores/threads exceeds threads_max,
 	// limit the number of threads to keep memory usage lower.
@@ -249,8 +251,7 @@ init_encoder(lzma_stream *strm, lzma_ret * lzma_err)
 	// FIXME: A better way could be to check the amount of RAM
 	// (or available RAM) and use lzma_stream_encoder_mt_memusage()
 	// to determine if the number of threads should be reduced.
-	if (mt.threads > thread_cnt)
-		mt.threads = thread_cnt;
+	mt.threads = thread_cnt;
 
 	// Initialize the threaded encoder.
 	lzma_ret ret = lzma_stream_encoder_mt(strm, &mt);
@@ -499,7 +500,7 @@ compress_main(int32_t argc, char **argv)
 	uint8_t * header = NULL;
 	uint32_t header_len = 0;
 
-	while((opt = getopt_long(argc, argv, "l:evth:",
+	while((opt = getopt_long(argc, argv, "l:evt:h:",
 		compress_options, &option_index)) != -1) {
 		switch (opt) {
 		case 'l':
