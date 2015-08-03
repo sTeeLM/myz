@@ -31,9 +31,10 @@ uint32_t compress_level = LZMA_PRESET_DEFAULT;
 ///////////////////////////////////////////////////
 uint64_t total_size = 0;
 uint64_t current_size = 0;
+
 //////////////////////////////////////////////////
 
-
+/*
 static void
 print_progress(uint32_t current_size, uint32_t total_size)
 {
@@ -42,6 +43,56 @@ print_progress(uint32_t current_size, uint32_t total_size)
 		return;
 	progress = (100.0 * current_size) / total_size;
 	fprintf(stderr, "\rIn progress %.2f%%", progress);
+}
+*/
+
+// Process has done i out of n rounds,
+// and we want a bar of width w and resolution r.
+static uint64_t old_c = 0;
+static int32_t have_print_once = 0; 
+static inline void 
+print_progress(uint64_t current_size, uint64_t total_size)
+{
+	uint64_t w = 70;
+	double ratio = 0.0;
+	uint64_t   c = 0;
+	uint64_t x;
+
+    // Calculuate the ratio of complete-to-incomplete.
+	ratio = current_size/(double)total_size;
+	c     = ratio * w;
+
+	if(old_c == c && old_c != 0 ) {
+		return;
+	} else if(old_c == c && old_c == 0 && have_print_once != 0) {
+		return;
+	}
+
+	for(x = 0; x < w + 10; x ++)
+		fprintf(stderr,"\b");
+
+	have_print_once = 1;
+
+	old_c = c;
+ 
+    // Show the percentage complete.
+	fprintf(stderr, "[", ratio * 100 );
+ 
+    // Show the load bar.
+	for (x=0; x < c; x++) {
+		//if(c >=1 & x + 1)
+		fprintf(stderr, "=");
+	}
+ 
+	for (int x=c; x<w; x++)
+		fprintf(stderr, " ");
+
+	fprintf(stderr, "] %0.2f%%", ratio * 100 );
+ 
+    // ANSI Control codes to go back to the
+    // previous line and clear it.
+	//if(c != w)
+	//fprintf(stderr,"]\n\033[F\033[J");
 }
 
 static int32_t
@@ -415,7 +466,7 @@ init_decompress_header(const char * file, uint32_t * len)
 
 	fread(header, 1, file_size, infile);
 	if (ferror(infile)) {
-		fprintf(stderr, "read file error: %s\n", strerror(errno));
+		fprintf(stderr, "%s: read file error: %s\n", file, strerror(errno));
 		goto err;
 	}
 
@@ -423,7 +474,7 @@ init_decompress_header(const char * file, uint32_t * len)
                     MY_ZIP_DATA_OFFSET,MY_ZIP_DATA_OFFSET_LEN);
 
 	if(NULL == p) {
-		fprintf(stderr, "corrupt file header\n");
+		fprintf(stderr, "%s: corrupt file header\n", file);
 		goto err;
 	}
 
@@ -435,7 +486,7 @@ init_decompress_header(const char * file, uint32_t * len)
                     MY_ZIP_MODE,MY_ZIP_MODE_LEN);
 
 	if(NULL == p) {
-		fprintf(stderr, "corrupt file header\n");
+		fprintf(stderr, "%s: corrupt file header\n", file);
 		goto err;
 	}
 
